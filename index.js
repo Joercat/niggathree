@@ -1,14 +1,19 @@
 const WebSocket = require('ws');
 const WebSocketServer = require('ws').WebSocketServer;
 
-// Read the IP address from the environment variable
-const backend_server_ip = process.env.FALIX_SERVER_IP;
+// Read the server address and port from a single environment variable
+const server_address = process.env.SERVER;
 
-// Read the port from the environment variable
-const backend_server_port = process.env.FALIX_SERVER_PORT;
+if (!server_address) {
+  console.error("Error: The 'SERVER' environment variable must be set in the format 'hostname:port'.");
+  process.exit(1);
+}
+
+// Split the string into hostname and port
+const [backend_server_ip, backend_server_port] = server_address.split(':');
 
 if (!backend_server_ip || !backend_server_port) {
-  console.error("Error: FALIX_SERVER_IP and FALIX_SERVER_PORT environment variables must be set.");
+  console.error("Error: The 'SERVER' environment variable is not in the correct 'hostname:port' format.");
   process.exit(1);
 }
 
