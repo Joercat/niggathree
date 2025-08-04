@@ -1,0 +1,12 @@
+{
+  "name": "eaglercraft-proxy",
+  "version": "1.0.0",
+  "description": "A WebSocket proxy for Eaglercraft servers",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
