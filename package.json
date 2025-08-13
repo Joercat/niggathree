@@ -9,6 +9,7 @@
   "dependencies": {
     "chalk": "^4.1.2",
     "ws": "^8.18.0",
-    "http": "0.0.1-security"
+    "http": "0.0.1-security",
+    "net": "^1.0.2"
   }
 }
