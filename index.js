@@ -34,7 +34,7 @@ let wss;
 let server;
 
 try {
-    // Create a standard HTTP server to handle health checks (Render's requirement)
+    // Create a standard HTTP server for a health check endpoint.
     server = http.createServer((req, res) => {
         if (req.url === '/health') {
             res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -70,7 +70,7 @@ wss.on('connection', (ws, req) => {
     console.log(`\n[CONN-${connectionId}] ➡️ New client connected from IP: ${clientIp}`);
 
     let falixServer;
-    const messageBuffer = []; // Buffer to hold messages until backend is ready
+    const messageBuffer = []; // Buffer to hold messages until the backend is ready
 
     try {
         console.log(`[CONN-${connectionId}] ⚪ Attempting to connect to backend at: ${backendUrl}`);
