@@ -1,13 +1,14 @@
 {
   "name": "eaglercraft-proxy",
   "version": "1.0.0",
-  "description": "A WebSocket proxy for Eaglercraft servers",
+  "description": "Eaglercraft 1.12.2 WebSocket proxy for Render to FalixNodes.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "ws": "^8.16.0",
+    "chalk": "^4.1.2",
+    "ws": "^8.18.0"
     "http": "0.0.1-security"
   }
 }
