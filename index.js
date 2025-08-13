@@ -1,8 +1,7 @@
-// --- 0. Dependencies ---
+
 const WebSocket = require('ws');
 const http = require('http');
-// Using chalk for colored console output makes logs much easier to read.
-// Make sure to install it: npm install chalk@4
+const net = require('net');
 const chalk = require('chalk');
 
 // --- A. Utility: Structured Logger ---
@@ -19,17 +18,13 @@ const logger = {
 
 // --- B. Constants & Configuration ---
 const CONSTANTS = {
-    // Standard WebSocket close codes
     CLOSE_NORMAL: 1000,
-    CLOSE_GOING_AWAY: 1001,
-    CLOSE_PROTOCOL_ERROR: 1002,
     CLOSE_INTERNAL_ERROR: 1011,
-    // How often to check for dead connections (in milliseconds)
     HEARTBEAT_INTERVAL: 30000,
 };
 
 logger.info('----------------------------------------------------');
-logger.info('Eaglercraft 1.12.2 Proxy Script - Enhanced Version');
+logger.info('Eaglercraft WebSocket-to-TCP Proxy - Enhanced Version');
 logger.info('----------------------------------------------------');
 
 // --- 1. Reading Environment Configuration ---
@@ -44,20 +39,57 @@ if (isNaN(PORT)) {
 }
 
 const parts = server_address.split(':');
-const backend_server_ip = parts[0];
-const backend_server_port = parseInt(parts[1], 10);
+const BACKEND_SERVER_IP = parts[0];
+const BACKEND_SERVER_PORT = parseInt(parts[1], 10);
 
-if (!backend_server_ip || isNaN(backend_server_port)) {
+if (!BACKEND_SERVER_IP || isNaN(BACKEND_SERVER_PORT)) {
     logger.fatal(`SERVER variable "${server_address}" is not in the correct 'hostname:port' format.`);
 }
 
-const backendUrl = `ws://${backend_server_ip}:${backend_server_port}`;
 logger.info(`Proxy will listen on port: ${PORT}`);
-logger.info(`Backend Minecraft server URL: ${backendUrl}`);
+logger.info(`Backend Minecraft server TCP address: ${BACKEND_SERVER_IP}:${BACKEND_SERVER_PORT}`);
 
-// --- 2. Initializing the Server ---
+
+// --- 2. NEW: Startup Check for Backend Server ---
+/**
+ * Tries to establish a brief TCP connection to the backend server to ensure it's online.
+ * @returns {Promise<void>} Resolves if connection is successful, rejects otherwise.
+ */
+function checkBackendServer() {
+    return new Promise((resolve, reject) => {
+        logger.info(`Performing pre-flight check on backend server at ${BACKEND_SERVER_IP}:${BACKEND_SERVER_PORT}...`);
+
+        const socket = net.createConnection({ host: BACKEND_SERVER_IP, port: BACKEND_SERVER_PORT });
+
+        // Add a timeout in case the connection hangs
+        socket.setTimeout(5000, () => {
+            socket.destroy();
+            reject(new Error('Connection timed out after 5 seconds.'));
+        });
+
+        socket.on('connect', () => {
+            logger.info(chalk.green('✅ Backend server is online. Pre-flight check passed.'));
+            socket.end(); // Immediately close the connection
+            resolve();
+        });
+
+        socket.on('error', (err) => {
+            let reason = '';
+            if (err.code === 'ECONNREFUSED') {
+                reason = 'Connection refused. Is the server running? Is the IP/port correct?';
+            } else if (err.code === 'ENOTFOUND') {
+                reason = 'Address not found. Check the hostname for typos.';
+            } else {
+                reason = `An unexpected network error occurred: ${err.message}`;
+            }
+            reject(new Error(reason));
+        });
+    });
+}
+
+
+// --- 3. Initializing the Server ---
 const server = http.createServer((req, res) => {
-    // A simple health check endpoint for deployment environments
     if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         res.end('OK');
@@ -70,154 +102,107 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (request, socket, head) => {
-    logger.info(`Received upgrade request from ${request.socket.remoteAddress}`);
     wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
     });
 });
 
-// --- 3. Handling a New Client Connection ---
+// --- 4. Handling a New Client Connection ---
 wss.on('connection', (clientWs, req) => {
     const connectionId = Math.random().toString(36).substr(2, 5).toUpperCase();
     const clientIp = req.socket.remoteAddress;
 
     logger.conn(connectionId, `➡️  New client connected from IP: ${clientIp}`);
+    
+    // This now connects to a TCP socket, not a WebSocket
+    const backendTcp = net.createConnection({ host: BACKEND_SERVER_IP, port: BACKEND_SERVER_PORT });
 
-    // Heartbeat mechanism: Mark client as alive
     clientWs.isAlive = true;
-    clientWs.on('pong', () => {
-        clientWs.isAlive = true;
-        logger.conn(connectionId, `❤️  Received pong from client.`);
-    });
+    clientWs.on('pong', () => { clientWs.isAlive = true; });
 
-    let backendWs;
-    const messageBuffer = [];
-
-    try {
-        logger.conn(connectionId, `⚪ Attempting to connect to backend: ${backendUrl}`);
-        backendWs = new WebSocket(backendUrl, {
-            // Forward headers from the client that the backend might need
-            headers: {
-                'X-Forwarded-For': clientIp
-            }
+    // --- Backend TCP Event Handlers ---
+    backendTcp.on('connect', () => {
+        logger.conn(connectionId, '✅ Successfully connected to backend Minecraft server.');
+        // Once connected, pipe the data directly.
+        clientWs.on('message', (message) => {
+            backendTcp.write(message);
         });
-    } catch (e) {
-        logger.error(`[CONN-${connectionId}] ❌ CRITICAL: Failed to create WebSocket instance for backend.`, e);
-        clientWs.close(CONSTANTS.CLOSE_INTERNAL_ERROR, 'Proxy failed to initiate backend connection.');
-        return;
-    }
-
-    // --- Backend Event Handlers ---
-    backendWs.on('open', () => {
-        logger.conn(connectionId, `✅ Successfully connected to backend. Flushing ${messageBuffer.length} buffered messages...`);
-        while (messageBuffer.length > 0) {
-            const message = messageBuffer.shift();
-            backendWs.send(message);
-        }
-        logger.conn(connectionId, `✅ Buffer flushed. Proxy is now transparent.`);
+        backendTcp.on('data', (data) => {
+            clientWs.send(data);
+        });
     });
 
-    backendWs.on('message', (message) => {
+    backendTcp.on('close', () => {
+        logger.conn(connectionId, '🚫 Backend TCP connection closed. Closing client connection.');
         if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(message);
-        } else {
-            logger.warn(`[CONN-${connectionId}] ⚠️ Client connection was closed. Dropping message from backend.`);
+            clientWs.close(CONSTANTS.CLOSE_NORMAL, 'Backend server disconnected.');
         }
     });
 
-    backendWs.on('close', (code, reason) => {
-        const reasonText = reason?.toString() || 'No reason given';
-        logger.conn(connectionId, `🚫 Backend connection closed. Code: ${code}, Reason: ${reasonText}. Closing client connection.`);
-        if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.close(code, reason);
-        }
-    });
-
-    backendWs.on('error', (error) => {
-        logger.error(`[CONN-${connectionId}] ❌ Error on backend connection:`, error);
+    backendTcp.on('error', (error) => {
+        logger.error(`[CONN-${connectionId}] ❌ Error on backend TCP connection:`, error);
         if (clientWs.readyState === WebSocket.OPEN) {
             clientWs.close(CONSTANTS.CLOSE_INTERNAL_ERROR, 'Backend connection error.');
         }
     });
 
-    // --- Client Event Handlers ---
-    clientWs.on('message', (message) => {
-        if (backendWs.readyState === WebSocket.OPEN) {
-            backendWs.send(message);
-        } else if (backendWs.readyState === WebSocket.CONNECTING) {
-            logger.conn(connectionId, `🟡 Backend not ready. Buffering client message (${messageBuffer.length + 1}).`);
-            messageBuffer.push(message);
-        } else {
-            logger.warn(`[CONN-${connectionId}] ⚠️ Backend connection was closed or errored. Dropping message from client.`);
-        }
-    });
-
+    // --- Client WebSocket Event Handlers ---
     clientWs.on('close', (code, reason) => {
         const reasonText = reason?.toString() || 'No reason given';
         logger.conn(connectionId, `🚫 Client disconnected. Code: ${code}, Reason: ${reasonText}. Closing backend connection.`);
-        if (backendWs && backendWs.readyState === WebSocket.OPEN) {
-            backendWs.close(code, reason);
+        if (!backendTcp.destroyed) {
+            backendTcp.destroy();
         }
     });
 
     clientWs.on('error', (error) => {
-        logger.error(`[CONN-${connectionId}] ❌ Error on client connection:`, error);
-        if (backendWs && backendWs.readyState === WebSocket.OPEN) {
-            backendWs.close(CONSTANTS.CLOSE_INTERNAL_ERROR, 'Client connection error.');
+        logger.error(`[CONN-${connectionId}] ❌ Error on client connection:`, error.message);
+        if (!backendTcp.destroyed) {
+            backendTcp.destroy();
         }
     });
 });
 
-wss.on('error', (error) => {
-    logger.error('The main proxy WebSocket server encountered an error:', error);
-});
-
-// --- 4. Heartbeat to Prune Dead Connections ---
+// --- 5. Heartbeat to Prune Dead Connections ---
 const heartbeat = setInterval(() => {
-    logger.info(`Running heartbeat check on ${wss.clients.size} clients...`);
     wss.clients.forEach((ws) => {
-        // Find the connectionId if possible (this is for logging only)
-        // Note: This is an inefficient way to get the ID. For high performance, you'd attach the ID to the ws object itself.
-        if (ws.isAlive === false) {
-            logger.warn(`Client failed heartbeat check. Terminating connection.`);
-            return ws.terminate();
-        }
-        ws.isAlive = false; // Set to false, expect a 'pong' to set it back to true
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
         ws.ping(() => {});
     });
 }, CONSTANTS.HEARTBEAT_INTERVAL);
 
-// --- 5. Start Server and Handle Shutdown ---
-server.listen(PORT, () => {
-    logger.info(`✅ HTTP/WebSocket server listening on port ${PORT}`);
-});
+// --- 6. Main Application Logic ---
+async function startServer() {
+    try {
+        // Await the pre-flight check before starting the server
+        await checkBackendServer();
+        
+        // If the check passes, start listening for connections
+        server.listen(PORT, () => {
+            logger.info(`✅ Proxy is online and listening on port ${PORT}`);
+        });
+
+    } catch (error) {
+        logger.fatal('Could not start proxy. The backend server check failed:', error.message);
+    }
+}
 
 const gracefulShutdown = (signal) => {
     logger.warn(`Received ${signal}. Shutting down gracefully...`);
-    clearInterval(heartbeat); // Stop the heartbeat
+    clearInterval(heartbeat);
     wss.close(() => {
-        logger.info('All WebSocket clients disconnected.');
         server.close(() => {
-            logger.info('HTTP server shut down.');
+            logger.info('Proxy shut down.');
             process.exit(0);
         });
     });
-
-    // Forcefully terminate any remaining clients after a timeout
-    setTimeout(() => {
-        logger.error('Could not close connections in time, forcing shutdown.');
-        process.exit(1);
-    }, 5000); // 5-second timeout
 };
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('uncaughtException', (error, origin) => { logger.fatal(`UNCAUGHT EXCEPTION at: ${origin}`, error); });
+process.on('unhandledRejection', (reason, promise) => { logger.fatal('UNHANDLED REJECTION at:', reason); });
 
-process.on('uncaughtException', (error, origin) => {
-    logger.fatal(`UNCAUGHT EXCEPTION at: ${origin}`, error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-    logger.fatal('UNHANDLED REJECTION at:', promise);
-    logger.fatal('Reason:', reason);
-});
+// Start the application
+startServer();
