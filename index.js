@@ -1,4 +1,3 @@
-
 const WebSocket = require('ws');
 const http = require('http');
 const net = require('net');
@@ -24,7 +23,7 @@ const CONSTANTS = {
 };
 
 logger.info('----------------------------------------------------');
-logger.info('Eaglercraft WebSocket-to-TCP Proxy - Enhanced Version');
+logger.info('Eaglercraft 1.12.2 WebSocket-to-TCP Proxy (Fixed)');
 logger.info('----------------------------------------------------');
 
 // --- 1. Reading Environment Configuration ---
@@ -50,7 +49,7 @@ logger.info(`Proxy will listen on port: ${PORT}`);
 logger.info(`Backend Minecraft server TCP address: ${BACKEND_SERVER_IP}:${BACKEND_SERVER_PORT}`);
 
 
-// --- 2. NEW: Startup Check for Backend Server ---
+// --- 2. Startup Check for Backend Server ---
 /**
  * Tries to establish a brief TCP connection to the backend server to ensure it's online.
  * @returns {Promise<void>} Resolves if connection is successful, rejects otherwise.
@@ -61,7 +60,6 @@ function checkBackendServer() {
 
         const socket = net.createConnection({ host: BACKEND_SERVER_IP, port: BACKEND_SERVER_PORT });
 
-        // Add a timeout in case the connection hangs
         socket.setTimeout(5000, () => {
             socket.destroy();
             reject(new Error('Connection timed out after 5 seconds.'));
@@ -110,11 +108,10 @@ server.on('upgrade', (request, socket, head) => {
 // --- 4. Handling a New Client Connection ---
 wss.on('connection', (clientWs, req) => {
     const connectionId = Math.random().toString(36).substr(2, 5).toUpperCase();
-    const clientIp = req.socket.remoteAddress;
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     logger.conn(connectionId, `➡️  New client connected from IP: ${clientIp}`);
     
-    // This now connects to a TCP socket, not a WebSocket
     const backendTcp = net.createConnection({ host: BACKEND_SERVER_IP, port: BACKEND_SERVER_PORT });
 
     clientWs.isAlive = true;
@@ -123,13 +120,37 @@ wss.on('connection', (clientWs, req) => {
     // --- Backend TCP Event Handlers ---
     backendTcp.on('connect', () => {
         logger.conn(connectionId, '✅ Successfully connected to backend Minecraft server.');
-        // Once connected, pipe the data directly.
+
+        // ----------------------- FIX: START -----------------------
+        // This is the corrected logic for handling the Eaglercraft 1.12.2 protocol.
+
+        // Handle messages from the Eaglercraft Client (WebSocket)
         clientWs.on('message', (message) => {
-            backendTcp.write(message);
+            if (Buffer.isBuffer(message) && message.length > 0) {
+                const opcode = message[0];
+                if (opcode === 0x01) { // 0x01 = Client-to-Server Game Packet
+                    if (!backendTcp.destroyed) {
+                        // Slice off the opcode and send the rest of the buffer (the raw MC packet) to the server.
+                        backendTcp.write(message.slice(1));
+                    }
+                } else {
+                    logger.conn(connectionId, `WARN: Received unknown/unhandled opcode from client: 0x${opcode.toString(16)}`);
+                }
+            }
         });
+
+        // Handle data from the Minecraft Server (TCP)
         backendTcp.on('data', (data) => {
-            clientWs.send(data);
+            // The server sends raw MC data. We must wrap it with the 0x02 opcode.
+            const opcode = Buffer.from([0x02]); // 0x02 = Server-to-Client Game Packet
+            const wrappedPacket = Buffer.concat([opcode, data]);
+            
+            if (clientWs.readyState === WebSocket.OPEN) {
+                clientWs.send(wrappedPacket);
+            }
         });
+
+        // ------------------------ FIX: END ------------------------
     });
 
     backendTcp.on('close', () => {
@@ -175,10 +196,8 @@ const heartbeat = setInterval(() => {
 // --- 6. Main Application Logic ---
 async function startServer() {
     try {
-        // Await the pre-flight check before starting the server
         await checkBackendServer();
         
-        // If the check passes, start listening for connections
         server.listen(PORT, () => {
             logger.info(`✅ Proxy is online and listening on port ${PORT}`);
         });
@@ -191,9 +210,10 @@ async function startServer() {
 const gracefulShutdown = (signal) => {
     logger.warn(`Received ${signal}. Shutting down gracefully...`);
     clearInterval(heartbeat);
-    wss.close(() => {
-        server.close(() => {
-            logger.info('Proxy shut down.');
+    server.close(() => {
+        logger.info('HTTP server closed.');
+        wss.close(() => {
+            logger.info('WebSocket server closed. Proxy shut down.');
             process.exit(0);
         });
     });
